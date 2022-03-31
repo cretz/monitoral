@@ -24,6 +24,7 @@ const (
 	SystemGetConfigName            = "monitoral.v1.Monitoral.SystemGetConfig"
 	HostRunName                    = "monitoral.v1.Monitoral.HostRun"
 	HostUpdateConfigName           = "monitoral.v1.Monitoral.HostUpdateConfig"
+	HostDoneName                   = "monitoral.v1.Monitoral.HostDone"
 	SystemUpdateConfigName         = "monitoral.v1.Monitoral.SystemUpdateConfig"
 	SystemUpdateNotificationsName  = "monitoral.v1.Monitoral.SystemUpdateNotifications"
 	HostCollectSignalName          = "monitoral.v1.Monitoral.HostCollect"
@@ -72,6 +73,11 @@ type Client interface {
 	// and check that the config didn't change or if it did, re-deliver the
 	// signal.
 	HostUpdateConfig(ctx context.Context, workflowID, runID string, req *HostUpdateConfigRequest) error
+
+	// Signal sent when the host is known to be done. This is sent with a
+	// signal-with-start so that it can make a new successfully closed workflow
+	// on top of a failed one if necessary.
+	HostDone(ctx context.Context, workflowID, runID string, req *HostDoneRequest) error
 
 	// SystemUpdateConfig is the signal to update the entire config.
 	SystemUpdateConfig(ctx context.Context, workflowID, runID string, req *SystemUpdateConfigRequest) error
@@ -183,6 +189,10 @@ func (c *clientImpl) HostUpdateConfig(ctx context.Context, workflowID, runID str
 	return c.client.SignalWorkflow(ctx, workflowID, runID, HostUpdateConfigName, req)
 }
 
+func (c *clientImpl) HostDone(ctx context.Context, workflowID, runID string, req *HostDoneRequest) error {
+	return c.client.SignalWorkflow(ctx, workflowID, runID, HostDoneName, req)
+}
+
 func (c *clientImpl) SystemUpdateConfig(ctx context.Context, workflowID, runID string, req *SystemUpdateConfigRequest) error {
 	return c.client.SignalWorkflow(ctx, workflowID, runID, SystemUpdateConfigName, req)
 }
@@ -240,6 +250,11 @@ type HostWorkflowRun interface {
 	// signal.
 	HostUpdateConfig(ctx context.Context, req *HostUpdateConfigRequest) error
 
+	// Signal sent when the host is known to be done. This is sent with a
+	// signal-with-start so that it can make a new successfully closed workflow
+	// on top of a failed one if necessary.
+	HostDone(ctx context.Context, req *HostDoneRequest) error
+
 	// HostCollect manually collects latest metrics for the host.
 	HostCollect(ctx context.Context, req *HostCollectRequest) (*HostCollectResponse, error)
 }
@@ -263,6 +278,10 @@ func (r *hostWorkflowRun) HostRun(ctx context.Context, req *HostRunRequest) erro
 
 func (r *hostWorkflowRun) HostUpdateConfig(ctx context.Context, req *HostUpdateConfigRequest) error {
 	return r.client.HostUpdateConfig(ctx, r.ID(), "", req)
+}
+
+func (r *hostWorkflowRun) HostDone(ctx context.Context, req *HostDoneRequest) error {
+	return r.client.HostDone(ctx, r.ID(), "", req)
 }
 
 func (r *hostWorkflowRun) HostCollect(ctx context.Context, req *HostCollectRequest) (*HostCollectResponse, error) {
@@ -336,6 +355,7 @@ type HostWorkflowInput struct {
 	Req              *HostWorkflowRequest
 	HostRun          HostRun
 	HostUpdateConfig HostUpdateConfig
+	HostDone         HostDone
 	HostCollect      HostCollect
 }
 
@@ -347,6 +367,7 @@ func (w hostWorkflowWorker) HostWorkflow(ctx workflow.Context, req *HostWorkflow
 	in := &HostWorkflowInput{Req: req}
 	in.HostRun.Channel = workflow.GetSignalChannel(ctx, HostRunName)
 	in.HostUpdateConfig.Channel = workflow.GetSignalChannel(ctx, HostUpdateConfigName)
+	in.HostDone.Channel = workflow.GetSignalChannel(ctx, HostDoneName)
 	in.HostCollect.Channel = workflow.GetSignalChannel(ctx, HostCollectSignalName)
 	impl, err := w.newImpl(ctx, in)
 	if err != nil {
@@ -475,6 +496,37 @@ func (s HostUpdateConfig) ReceiveAsync() *HostUpdateConfigRequest {
 
 // Select adds the callback to the selector to be invoked when signal received. Callback can be nil.
 func (s HostUpdateConfig) Select(sel workflow.Selector, fn func(*HostUpdateConfigRequest)) workflow.Selector {
+	return sel.AddReceive(s.Channel, func(workflow.ReceiveChannel, bool) {
+		req := s.ReceiveAsync()
+		if fn != nil {
+			fn(req)
+		}
+	})
+}
+
+// Signal sent when the host is known to be done. This is sent with a
+// signal-with-start so that it can make a new successfully closed workflow
+// on top of a failed one if necessary.
+type HostDone struct{ Channel workflow.ReceiveChannel }
+
+// Receive blocks until signal is received.
+func (s HostDone) Receive(ctx workflow.Context) *HostDoneRequest {
+	var resp HostDoneRequest
+	s.Channel.Receive(ctx, &resp)
+	return &resp
+}
+
+// ReceiveAsync returns received signal or nil if none.
+func (s HostDone) ReceiveAsync() *HostDoneRequest {
+	var resp HostDoneRequest
+	if !s.Channel.ReceiveAsync(&resp) {
+		return nil
+	}
+	return &resp
+}
+
+// Select adds the callback to the selector to be invoked when signal received. Callback can be nil.
+func (s HostDone) Select(sel workflow.Selector, fn func(*HostDoneRequest)) workflow.Selector {
 	return sel.AddReceive(s.Channel, func(workflow.ReceiveChannel, bool) {
 		req := s.ReceiveAsync()
 		if fn != nil {
@@ -655,6 +707,13 @@ func (r HostWorkflowChildRun) HostUpdateConfig(ctx workflow.Context, req *HostUp
 	return r.Future.SignalChildWorkflow(ctx, HostUpdateConfigName, req)
 }
 
+// Signal sent when the host is known to be done. This is sent with a
+// signal-with-start so that it can make a new successfully closed workflow
+// on top of a failed one if necessary.
+func (r HostWorkflowChildRun) HostDone(ctx workflow.Context, req *HostDoneRequest) workflow.Future {
+	return r.Future.SignalChildWorkflow(ctx, HostDoneName, req)
+}
+
 // HostCollect manually collects latest metrics for the host.
 func (r HostWorkflowChildRun) HostCollect(ctx workflow.Context, req *HostCollectRequest) (HostCollectResponseExternal, error) {
 	var resp HostCollectResponseExternal
@@ -748,6 +807,13 @@ func HostUpdateConfigExternal(ctx workflow.Context, workflowID, runID string, re
 	return workflow.SignalExternalWorkflow(ctx, workflowID, runID, HostUpdateConfigName, req)
 }
 
+// Signal sent when the host is known to be done. This is sent with a
+// signal-with-start so that it can make a new successfully closed workflow
+// on top of a failed one if necessary.
+func HostDoneExternal(ctx workflow.Context, workflowID, runID string, req *HostDoneRequest) workflow.Future {
+	return workflow.SignalExternalWorkflow(ctx, workflowID, runID, HostDoneName, req)
+}
+
 // SystemUpdateConfig is the signal to update the entire config.
 func SystemUpdateConfigExternal(ctx workflow.Context, workflowID, runID string, req *SystemUpdateConfigRequest) workflow.Future {
 	return workflow.SignalExternalWorkflow(ctx, workflowID, runID, SystemUpdateConfigName, req)
@@ -822,8 +888,10 @@ func (e HostCollectResponseExternal) Select(sel workflow.Selector, fn func(*Host
 // ActivitiesImpl is an interface for activity implementations.
 type ActivitiesImpl interface {
 
-	// HostRunActivity is the long-running activity on the host.
-	HostRunActivity(context.Context, *HostRunRequest) error
+	// HostRunActivity is the long-running activity on the host. This only returns
+	// successfully on cancel and the value can be used to call again to resume
+	// where left off.
+	HostRunActivity(context.Context, *HostRunRequest) (*HostRunRequest, error)
 
 	// HostUpdateConfigActivity is the update activity triggered by the signal.
 	HostUpdateConfigActivity(context.Context, *HostUpdateConfigRequest) error
@@ -844,11 +912,13 @@ func RegisterActivities(r worker.ActivityRegistry, a ActivitiesImpl) {
 }
 
 // RegisterHostRunActivity registers the single activity.
-func RegisterHostRunActivity(r worker.ActivityRegistry, impl func(context.Context, *HostRunRequest) error) {
+func RegisterHostRunActivity(r worker.ActivityRegistry, impl func(context.Context, *HostRunRequest) (*HostRunRequest, error)) {
 	r.RegisterActivityWithOptions(impl, activity.RegisterOptions{Name: HostRunActivityName})
 }
 
-// HostRunActivity is the long-running activity on the host.
+// HostRunActivity is the long-running activity on the host. This only returns
+// successfully on cancel and the value can be used to call again to resume
+// where left off.
 func HostRunActivity(ctx workflow.Context, opts *workflow.ActivityOptions, req *HostRunRequest) HostRunActivityFuture {
 	if opts == nil {
 		ctxOpts := workflow.GetActivityOptions(ctx)
@@ -858,8 +928,10 @@ func HostRunActivity(ctx workflow.Context, opts *workflow.ActivityOptions, req *
 	return HostRunActivityFuture{workflow.ExecuteActivity(ctx, HostRunActivityName, req)}
 }
 
-// HostRunActivity is the long-running activity on the host.
-func HostRunActivityLocal(ctx workflow.Context, opts *workflow.LocalActivityOptions, fn func(context.Context, *HostRunRequest) error, req *HostRunRequest) HostRunActivityFuture {
+// HostRunActivity is the long-running activity on the host. This only returns
+// successfully on cancel and the value can be used to call again to resume
+// where left off.
+func HostRunActivityLocal(ctx workflow.Context, opts *workflow.LocalActivityOptions, fn func(context.Context, *HostRunRequest) (*HostRunRequest, error), req *HostRunRequest) HostRunActivityFuture {
 	if opts == nil {
 		ctxOpts := workflow.GetLocalActivityOptions(ctx)
 		opts = &ctxOpts
@@ -872,8 +944,12 @@ func HostRunActivityLocal(ctx workflow.Context, opts *workflow.LocalActivityOpti
 type HostRunActivityFuture struct{ Future workflow.Future }
 
 // Get waits for completion.
-func (f HostRunActivityFuture) Get(ctx workflow.Context) error {
-	return f.Future.Get(ctx, nil)
+func (f HostRunActivityFuture) Get(ctx workflow.Context) (*HostRunRequest, error) {
+	var resp HostRunRequest
+	if err := f.Future.Get(ctx, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
 }
 
 // Select adds the completion to the selector. Callback can be nil.

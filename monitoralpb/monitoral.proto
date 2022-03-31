@@ -20,6 +20,7 @@ service Monitoral {
     option (temporal.sdk.workflow) = {
       signal: { ref: 'HostRun' }
       signal: { ref: 'HostUpdateConfig' }
+      signal: { ref: 'HostDone' }
       call: { ref: 'HostCollect' }
     };
   }
@@ -32,8 +33,10 @@ service Monitoral {
     option (temporal.sdk.signal) = { };
   }
 
-  // HostRunActivity is the long-running activity on the host.
-  rpc HostRunActivity(HostRunRequest) returns (google.protobuf.Empty) {
+  // HostRunActivity is the long-running activity on the host. This only returns
+  // successfully on cancel and the value can be used to call again to resume
+  // where left off.
+  rpc HostRunActivity(HostRunRequest) returns (HostRunRequest) {
     option (temporal.sdk.activity) = { };
   }
 
@@ -54,6 +57,13 @@ service Monitoral {
   // HostUpdateConfigActivity is the update activity triggered by the signal.
   rpc HostUpdateConfigActivity(HostUpdateConfigRequest) returns (google.protobuf.Empty) {
     option (temporal.sdk.activity) = { };
+  }
+
+  // Signal sent when the host is known to be done. This is sent with a
+  // signal-with-start so that it can make a new successfully closed workflow
+  // on top of a failed one if necessary.
+  rpc HostDone(HostDoneRequest) returns (google.protobuf.Empty) {
+    option (temporal.sdk.signal) = { };
   }
 
   // HostCollect manually collects latest metrics for the host.
@@ -104,22 +114,30 @@ service Monitoral {
 }
 
 message HostWorkflowRequest {
+  // Should only be set on continue-as-new
+  HostRunRequest continue_run_request = 1;
 }
 
 message HostRunRequest {
   // This should be unique every time the host worker process is started
   string task_queue = 1;
-  repeated HostConfig configs = 2;
+  // This may be older than one from update config request, so the workflow is
+  // responsible for only using the newest. Always greater than 0.
+  uint64 config_mutation_seq = 2;
+  repeated HostConfig configs = 3;
+  google.protobuf.Any prev_run_snapshot = 4;
 }
 
 message HostUpdateConfigRequest {
   // May not be sequential, but should be discarded if this is before the last
-  // received seq
+  // received seq. Always greater than 0.
   uint64 mutation_seq = 1;
-  // This can be an empty config (except for tag) if the configuration for that
-  // tag has been removed. This will only contain the configs for the tags the
-  // workflow has.
+  // This is the full set of known configs for the tags. This means on update
+  // a tag can be not present here which means a deleted config.
   repeated HostConfig configs = 2;
+}
+
+message HostDoneRequest {
 }
 
 message HostCollectRequest {
@@ -134,9 +152,11 @@ message HostCollectRequest {
 
 message HostCollectResponse {
   repeated Metric metrics = 1;
+  // No metrics present if there is an error
+  string error = 2;
 
   // Metadata needed for a "call"
-  string id = 2;
+  string id = 3;
 }
 
 message SystemWorkflowRequest {
@@ -163,7 +183,8 @@ message SystemGetConfigRequest {
 }
 
 message SystemGetConfigResponse {
-  // May not be sequential, but can be used to determine order
+  // May not be sequential, but can be used to determine order. Always greater
+  // than 0.
   uint64 mutation_seq = 1;
   // Replaces entire existing config
   SystemConfig config = 2;
