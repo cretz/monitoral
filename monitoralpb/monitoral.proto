@@ -1,0 +1,249 @@
+syntax = "proto3";
+
+option go_package = "github.com/cretz/monitoral/monitoralpb";
+
+package monitoral.v1;
+
+import "google/protobuf/any.proto";
+import "google/protobuf/duration.proto";
+import "google/protobuf/empty.proto";
+import "google/protobuf/timestamp.proto";
+import "temporalpb/sdk.proto";
+
+service Monitoral {
+  // HostWorkflow runs on the system task queue and maintains a long-running
+  // activity on the host. This will contain the following search attributes and
+  // memo values:
+  // * "monitoral-host" - Hostname
+  // * "monitoral-tags" - "|" delimited set of tags
+  rpc HostWorkflow(HostWorkflowRequest) returns (google.protobuf.Empty) {
+    option (temporal.sdk.workflow) = {
+      signal: { ref: 'HostRun' }
+      signal: { ref: 'HostUpdateConfig' }
+      call: { ref: 'HostCollect' }
+    };
+  }
+
+  // HostRun is sent as signal-with-start to HostWorkflow to start or restart
+  // the long-running activity on the host with the given task queue. If it is a
+  // restart, the existing activity is expected to be cancelled if
+  // running.
+  rpc HostRun(HostRunRequest) returns (google.protobuf.Empty) {
+    option (temporal.sdk.signal) = { };
+  }
+
+  // HostRunActivity is the long-running activity on the host.
+  rpc HostRunActivity(HostRunRequest) returns (google.protobuf.Empty) {
+    option (temporal.sdk.activity) = { };
+  }
+
+  // HostUpdateConfig requests the workflow to update the given configurations.
+  // This is usually called from an activity from the system workflow to update
+  // config.
+  //
+  // There is a known race condition where a config can be updated on the system
+  // workflow while a host is just getting started and therefore the host may
+  // not by in the list to update. It is encumbent upon the host workflow
+  // starter to wait a reasonable amount of time after the workflow is started
+  // and check that the config didn't change or if it did, re-deliver the
+  // signal.
+  rpc HostUpdateConfig(HostUpdateConfigRequest) returns (google.protobuf.Empty) {
+    option (temporal.sdk.signal) = { };
+  }
+
+  // HostUpdateConfigActivity is the update activity triggered by the signal.
+  rpc HostUpdateConfigActivity(HostUpdateConfigRequest) returns (google.protobuf.Empty) {
+    option (temporal.sdk.activity) = { };
+  }
+
+  // HostCollect manually collects latest metrics for the host.
+  rpc HostCollect(HostCollectRequest) returns (HostCollectResponse) {
+    option (temporal.sdk.call) = { };
+  }
+
+  // HostCollectActivity is the collect activity triggered by the call.
+  rpc HostCollectActivity(HostCollectRequest) returns (HostCollectResponse) {
+    option (temporal.sdk.activity) = { };
+  }
+
+  // SystemWorkflow is the single workflow for managing config and
+  // notifications.
+  rpc SystemWorkflow(SystemWorkflowRequest) returns (google.protobuf.Empty) {
+    option (temporal.sdk.workflow) = {
+      signal: { ref: 'SystemUpdateConfig' }
+      signal: { ref: 'SystemUpdateNotifications' }
+      query: { ref: 'SystemGetNotifications' }
+      query: { ref: 'SystemGetConfig' }
+    };
+  }
+
+  // SystemUpdateConfig is the signal to update the entire config.
+  rpc SystemUpdateConfig(SystemUpdateConfigRequest) returns (google.protobuf.Empty) {
+    option (temporal.sdk.signal) = { };
+  }
+
+  // SystemUpdateConfigActivity is the update activity triggered by the signal.
+  rpc SystemUpdateConfigActivity(SystemUpdateConfigRequest) returns (google.protobuf.Empty) {
+    option (temporal.sdk.activity) = { };
+  }
+
+  // SystemUpdateNotifications creates/updates notifications.
+  rpc SystemUpdateNotifications(SystemUpdateNotificationsRequest) returns (google.protobuf.Empty) {
+    option (temporal.sdk.signal) = { };
+  }
+
+  // SystemGetNotifications returns notifications.
+  rpc SystemGetNotifications(SystemGetNotificationsRequest) returns (SystemGetNotificationsResponse) {
+    option (temporal.sdk.query) = { };
+  }
+
+  // SystemGetConfig returns the current system config.
+  rpc SystemGetConfig(SystemGetConfigRequest) returns (SystemGetConfigResponse) {
+    option (temporal.sdk.query) = { };
+  }
+}
+
+message HostWorkflowRequest {
+}
+
+message HostRunRequest {
+  // This should be unique every time the host worker process is started
+  string task_queue = 1;
+  repeated HostConfig configs = 2;
+}
+
+message HostUpdateConfigRequest {
+  // May not be sequential, but should be discarded if this is before the last
+  // received seq
+  uint64 mutation_seq = 1;
+  // This can be an empty config (except for tag) if the configuration for that
+  // tag has been removed. This will only contain the configs for the tags the
+  // workflow has.
+  repeated HostConfig configs = 2;
+}
+
+message HostCollectRequest {
+  // If empty, assumes all exported metrics
+  repeated string metrics = 1;
+
+  // Metadata needed for a "call"
+  string id = 2;
+  string response_task_queue = 3;
+  string response_workflow_id = 4;
+}
+
+message HostCollectResponse {
+  repeated Metric metrics = 1;
+
+  // Metadata needed for a "call"
+  string id = 2;
+}
+
+message SystemWorkflowRequest {
+}
+
+message SystemUpdateConfigRequest {
+  SystemConfig config = 1;
+}
+
+message SystemUpdateNotificationsRequest {
+  repeated Notification notifications = 1;
+}
+
+message SystemGetNotificationsRequest {
+  Expression filter = 1;
+}
+
+message SystemGetNotificationsResponse {
+  repeated Notification notification = 1;
+  uint64 archived_notifications = 3;
+}
+
+message SystemGetConfigRequest {
+}
+
+message SystemGetConfigResponse {
+  // May not be sequential, but can be used to determine order
+  uint64 mutation_seq = 1;
+  // Replaces entire existing config
+  SystemConfig config = 2;
+}
+
+message SystemConfig {
+  repeated HostConfig host_configs = 1;
+  // Defaults to a reasonable number
+  uint32 max_notifications = 2;
+}
+
+message HostConfig {
+  string tag = 1;
+
+  repeated Metric metric = 2;
+  repeated Alert alerts = 3;
+
+  message Metric {
+    string name = 1;
+    // Order of operations:
+    // * depends_on_metrics evaluated and put as accessible vars
+    // * For each unique combination of dimension:
+    //   * Dimension is set as accessible var and this primary expression is run
+    //   * Dimension is set as accessible var and each label expression is run
+    Expression expr = 2;
+    repeated string depends_on_metrics = 3;
+    google.protobuf.Duration memoize_ttl = 4;
+    // Each dimension expression should return a collection
+    map<string, Expression> dimension_exprs = 5;
+    map<string, Expression> label_exprs = 6;
+    bool exported = 7;
+  }
+
+  message Alert {
+    string name = 1;
+    // Must evaluate to a boolean
+    Expression expr = 2;
+    repeated string depends_on_metrics = 3;
+    string description = 4;
+    google.protobuf.Duration check_freq = 5;
+    google.protobuf.Duration for = 6;
+  }
+}
+
+message Expression {
+  oneof expression {
+    string cel_expression = 1;
+  }
+}
+
+message Metric {
+  string name = 1;
+  google.protobuf.Timestamp collected_on = 2;
+  google.protobuf.Any value = 3;
+  map<string, string> labels = 4;
+}
+
+message Notification {
+  string id = 1;
+
+  oneof detail {
+    HostAlert host_alert_started = 2;
+    HostAlert host_alert_stopped = 3;
+    Host host_activity_started = 4;
+    Host host_activity_stopped = 5;
+  }
+
+  google.protobuf.Timestamp started_on = 6;
+  string notes = 7;
+  map<string, string> labels = 8;
+  bool visible = 9;
+  bool active = 10;
+
+  message HostAlert {
+    string host = 1;
+    HostConfig.Alert alert_config = 2;
+    map<string, Metric> metrics = 3;
+  }
+
+  message Host {
+    string host = 1;
+  }
+}
