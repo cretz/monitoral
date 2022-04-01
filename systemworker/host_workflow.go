@@ -11,10 +11,14 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-const ticksUntilContinueAsNew = 500
+const (
+	ticksUntilContinueAsNew = 500
+	SystemWorkflowID        = "system-workflow"
+)
 
 type hostWorkflow struct {
 	*monitoralpb.HostWorkflowInput
+	info *HostInfo
 
 	pendingCollectRequests []workflow.Future
 	lastActivityRunRequest *monitoralpb.HostRunRequest
@@ -30,7 +34,29 @@ func newHostWorkflow(ctx workflow.Context, in *monitoralpb.HostWorkflowInput) (m
 	return &hostWorkflow{HostWorkflowInput: in}, nil
 }
 
-func (h *hostWorkflow) Run(ctx workflow.Context) error {
+func (h *hostWorkflow) Run(ctx workflow.Context) (workflowErr error) {
+	// Get host info from attributes
+	h.info = HostInfoFromSearchAttributes(workflow.GetInfo(ctx).SearchAttributes)
+	if h.info == nil {
+		return fmt.Errorf("missing search attributes")
+	}
+
+	// Notify the system we have started
+	if err := h.notifySystem(ctx, false, ""); err != nil {
+		return fmt.Errorf("failed notifying system of start: %w", err)
+	}
+
+	// Notify the system upon complete
+	defer func() {
+		stopReason := ""
+		if workflowErr != nil && !workflow.IsContinueAsNewError(workflowErr) {
+			stopReason = workflowErr.Error()
+		}
+		if err := h.notifySystem(ctx, true, stopReason); err != nil {
+			workflow.GetLogger(ctx).Warn("Failed to update system that host is complete")
+		}
+	}()
+
 	// If there is a continue request, start it
 	if h.Req.ContinueRunRequest != nil {
 		if err := h.startActivity(ctx, h.Req.ContinueRunRequest); err != nil {
@@ -87,6 +113,29 @@ func (h *hostWorkflow) Run(ctx workflow.Context) error {
 			h.hostActivityCancel = nil
 		}
 	}
+}
+
+// Only an unexpected stop if done + stop reason, otherwise stop reason ignored
+func (h *hostWorkflow) notifySystem(ctx workflow.Context, done bool, stopReason string) error {
+	// We want a disconnected context just in case
+	ctx, _ = workflow.NewDisconnectedContext(ctx)
+
+	// Build notification
+	notification := &monitoralpb.Notification{Host: h.info.Name, Name: "host:status"}
+	status := &monitoralpb.Notification_StatusChange{Reason: stopReason}
+	if !done {
+		notification.Detail = &monitoralpb.Notification_ActivityStarted{ActivityStarted: status}
+	} else if stopReason == "" {
+		notification.Detail = &monitoralpb.Notification_ActivityDone{ActivityDone: status}
+	} else {
+		notification.Detail = &monitoralpb.Notification_ActivityStopped{ActivityStopped: status}
+	}
+
+	// Send notification
+	// TODO(cretz): Any concern with this hanging?
+	return monitoralpb.SystemUpdateNotificationsExternal(ctx, SystemWorkflowID, "",
+		&monitoralpb.SystemUpdateNotificationsRequest{Notifications: []*monitoralpb.Notification{notification}}).
+		Get(ctx, nil)
 }
 
 type tickResponse struct {
@@ -228,6 +277,7 @@ func (h *hostWorkflow) updateConfig(ctx workflow.Context, req *monitoralpb.HostU
 		RetryPolicy: &temporal.RetryPolicy{MaximumAttempts: 1},
 	}
 	if err := monitoralpb.HostUpdateConfigActivity(ctx, opts, req).Get(ctx); err != nil {
+		// TODO(cretz): Make this a notification instead
 		return fmt.Errorf("failed updating activity config: %w", err)
 	}
 	return nil

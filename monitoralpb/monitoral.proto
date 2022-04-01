@@ -12,10 +12,9 @@ import "temporalpb/sdk.proto";
 
 service Monitoral {
   // HostWorkflow runs on the system task queue and maintains a long-running
-  // activity on the host. This will contain the following search attributes and
-  // memo values:
+  // activity on the host. This will contain the following search attributes:
   // * "monitoral-host" - Hostname
-  // * "monitoral-tags" - "|" delimited set of tags
+  // * "monitoral-tags" - String array of tags
   rpc HostWorkflow(HostWorkflowRequest) returns (google.protobuf.Empty) {
     option (temporal.sdk.workflow) = {
       signal: { ref: 'HostRun' }
@@ -125,7 +124,7 @@ message HostRunRequest {
   // responsible for only using the newest. Always greater than 0.
   uint64 config_mutation_seq = 2;
   repeated HostConfig configs = 3;
-  google.protobuf.Any prev_run_snapshot = 4;
+  bytes prev_run_snapshot = 4;
 }
 
 message HostUpdateConfigRequest {
@@ -143,11 +142,17 @@ message HostDoneRequest {
 message HostCollectRequest {
   // If empty, assumes all exported metrics
   repeated string metrics = 1;
+  // Both of these are inclusive, neither are required.
+  google.protobuf.Duration collected_since = 2;
+  google.protobuf.Duration collected_until = 3;
+
+  // If true, only the latest metric per name is given.
+  bool latest_only = 4;
 
   // Metadata needed for a "call"
-  string id = 2;
-  string response_task_queue = 3;
-  string response_workflow_id = 4;
+  string id = 5;
+  string response_task_queue = 6;
+  string response_workflow_id = 7;
 }
 
 message HostCollectResponse {
@@ -171,7 +176,7 @@ message SystemUpdateNotificationsRequest {
 }
 
 message SystemGetNotificationsRequest {
-  Expression filter = 1;
+  // TODO(cretz): string query = 1;
 }
 
 message SystemGetNotificationsResponse {
@@ -199,39 +204,30 @@ message SystemConfig {
 message HostConfig {
   string tag = 1;
 
-  repeated Metric metric = 2;
-  repeated Alert alerts = 3;
+  repeated Metric metrics = 2;
 
   message Metric {
     string name = 1;
-    // Order of operations:
-    // * depends_on_metrics evaluated and put as accessible vars
-    // * For each unique combination of dimension:
-    //   * Dimension is set as accessible var and this primary expression is run
-    //   * Dimension is set as accessible var and each label expression is run
-    Expression expr = 2;
-    repeated string depends_on_metrics = 3;
-    google.protobuf.Duration memoize_ttl = 4;
-    // Each dimension expression should return a collection
-    map<string, Expression> dimension_exprs = 5;
-    map<string, Expression> label_exprs = 6;
-    bool exported = 7;
+    string description = 2;
+    Exec exec = 3;
+    google.protobuf.Duration exec_freq = 4;
+    bool exported = 5;
+    // If true, and rows returned from the last query will trigger an alert. If
+    // the query constantly flaps (i.e. returns a value then doesn't), a lot of
+    // alerts will occur. It is currently the query writer's responsibility to
+    // do whatever is necessary to prevent flapping (e.g. store state and wait
+    // until after so long).
+    // TODO(cretz): How best to report the detailed alerting data?
+    bool alert_if_results = 6;
   }
 
-  message Alert {
-    string name = 1;
-    // Must evaluate to a boolean
-    Expression expr = 2;
-    repeated string depends_on_metrics = 3;
-    string description = 4;
-    google.protobuf.Duration check_freq = 5;
-    google.protobuf.Duration for = 6;
-  }
-}
-
-message Expression {
-  oneof expression {
-    string cel_expression = 1;
+  message Exec {
+    oneof exec {
+      // For regular metrics, the set of queries herein should delete to enforce
+      // retention and insert for the collected value. For alerting metrics,
+      // this should usually also select values for return as the last query.
+      string sql_query_template = 1;
+    }
   }
 }
 
@@ -243,28 +239,45 @@ message Metric {
 }
 
 message Notification {
+  // Automatically populated if empty on update
   string id = 1;
 
+  string host = 2;
+
+  // Only the latest of the name is active
+  string name = 3;
+
   oneof detail {
-    HostAlert host_alert_started = 2;
-    HostAlert host_alert_stopped = 3;
-    Host host_activity_started = 4;
-    Host host_activity_stopped = 5;
+    // Automatically marked active when received
+    AlertChange alert_started = 4;
+    // Automatically marks all of the same host+name inactive
+    AlertChange alert_stopped = 5;
+    // Automatically marked active when received. All alerts are marked
+    // inactive.
+    StatusChange activity_started = 6;
+    // Automatically marks all of the same host+name inactive including alerts.
+    StatusChange activity_done = 7;
+    // Automatically marked active when received. All alerts are marked
+    // inactive.
+    StatusChange activity_stopped = 8;
   }
 
-  google.protobuf.Timestamp started_on = 6;
-  string notes = 7;
-  map<string, string> labels = 8;
-  bool visible = 9;
-  bool active = 10;
+  // Automatically populated if empty on update
+  google.protobuf.Timestamp started_on = 9;
+  string notes = 10;
+  map<string, string> labels = 11;
+  // Automatically defaulted to true when first seen
+  bool visible = 12;
+  // This is a system controlled value, cannot be mutated. Is only true if there
+  // is an active alert, activity start, or activity stop.
+  bool active = 13;
 
-  message HostAlert {
-    string host = 1;
-    HostConfig.Alert alert_config = 2;
-    map<string, Metric> metrics = 3;
+  message AlertChange {
+    string description = 1;
+    // TODO(cretz): How best to report data?
   }
 
-  message Host {
-    string host = 1;
+  message StatusChange {
+    string reason = 1;
   }
 }

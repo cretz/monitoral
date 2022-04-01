@@ -34,10 +34,9 @@ const (
 type Client interface {
 
 	// HostWorkflow runs on the system task queue and maintains a long-running
-	// activity on the host. This will contain the following search attributes and
-	// memo values:
+	// activity on the host. This will contain the following search attributes:
 	// * "monitoral-host" - Hostname
-	// * "monitoral-tags" - "|" delimited set of tags
+	// * "monitoral-tags" - String array of tags
 	ExecuteHostWorkflow(ctx context.Context, opts *client.StartWorkflowOptions, req *HostWorkflowRequest) (HostWorkflowRun, error)
 
 	// GetHostWorkflow returns an existing run started by ExecuteHostWorkflow.
@@ -342,10 +341,9 @@ func (r *systemWorkflowRun) SystemUpdateNotifications(ctx context.Context, req *
 }
 
 // HostWorkflow runs on the system task queue and maintains a long-running
-// activity on the host. This will contain the following search attributes and
-// memo values:
+// activity on the host. This will contain the following search attributes:
 // * "monitoral-host" - Hostname
-// * "monitoral-tags" - "|" delimited set of tags
+// * "monitoral-tags" - String array of tags
 type HostWorkflowImpl interface {
 	Run(workflow.Context) error
 }
