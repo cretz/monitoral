@@ -1,0 +1,79 @@
+@startuml
+hide footbox
+box "Central Worker"
+participant "System Workflow" as SysWorkflow
+collections "Host Workflow" as HostWorkflow
+end box
+box "Host Worker"
+collections "Host Activities" as HostActivities
+end box
+
+title System Startup
+
+[-> SysWorkflow : start
+SysWorkflow -> SysWorkflow : run forever
+
+newpage Host Startup
+
+SysWorkflow <-] : request config
+SysWorkflow -->] : provide config
+HostActivities <-o] : start worker
+HostWorkflow <-] : signal-with-start
+note over HostWorkflow, HostActivities: start has search attrs, signal contains\nconfig and worker task queue
+alt first start
+  HostWorkflow -> SysWorkflow : signal started
+else already running
+  HostWorkflow -> HostActivities : cancel old worker
+  HostActivities x--> HostWorkflow : cancel complete
+end
+HostWorkflow -> HostActivities : start
+note over HostWorkflow, HostActivities: no retry, short schedule-to-start
+HostActivities -> HostActivities : run forever
+
+newpage Host Failure
+
+HostActivities x-> HostWorkflow : activity failure
+HostWorkflow -> SysWorkflow : signal failed
+HostWorkflow ->x HostWorkflow : fail
+[<- SysWorkflow : start custom\nalert workflow
+
+newpage Client Calls
+
+[-> SysWorkflow : update config
+SysWorkflow -> HostWorkflow : update matching configs
+note right of SysWorkflow: done via activity
+HostWorkflow -> HostActivities : update config
+HostActivities -> HostActivities : apply
+|||
+[-> SysWorkflow : remove host
+SysWorkflow -> HostWorkflow : signal host done
+HostWorkflow ->x HostWorkflow : finish
+HostWorkflow ->x HostActivities : cancel
+|||
+[-> SysWorkflow : get notifications
+note right : via query, can filter
+[<-- SysWorkflow : notifications
+|||
+[->x SysWorkflow : get hosts
+note right : via list workflows, can use search attrs
+[<--x SysWorkflow : hosts
+|||
+[-> HostWorkflow : collect metrics
+HostWorkflow -> HostActivities : collect metrics
+HostActivities --> HostWorkflow : collected metrics
+[<-- HostWorkflow : collected metrics
+
+newpage Alert Status Change
+
+HostActivities -> SysWorkflow : signal alert status change
+[<- SysWorkflow : start custom\nalert workflow
+
+newpage Host Continue As New
+
+HostWorkflow -> HostActivities : cancel
+HostActivities x--> HostWorkflow : serialized state
+HostWorkflow x-> HostWorkflow : continue as new
+HostWorkflow -> HostActivities : start with\nserialized state
+HostActivities -> HostActivities : run forever
+
+@enduml

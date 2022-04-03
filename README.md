@@ -1,6 +1,19 @@
 # Monitoral
 
-(under development)
+Monitoral is a demonstration of a monitoring system backed by Temporal.
+
+**⚠️ UNDER DEVELOPMENT**
+
+The documentation herein is about the design and end-goals rather than the current state of the system.
+
+## Sequences
+
+![](.github/readme-assets/diagram-page1.png)
+![](.github/readme-assets/diagram-page2.png)
+![](.github/readme-assets/diagram-page3.png)
+![](.github/readme-assets/diagram-page4.png)
+![](.github/readme-assets/diagram-page5.png)
+![](.github/readme-assets/diagram-page6.png)
 
 ## Development
 
